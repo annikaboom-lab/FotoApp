@@ -27,7 +27,16 @@
       background: var(--primary); color:#fff; min-width:140px;
     }
     button.secondary { background:#2b2b2b; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
     #sensorPermBtn { display:none; margin-left:12px; }
+    #permissionOverlay {
+      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      background: rgba(0,0,0,.8); backdrop-filter: blur(10px); padding:20px;
+      text-align:center; gap:16px; flex-direction:column;
+    }
+    #permissionOverlay p { margin:0; max-width:320px; line-height:1.5; }
+    .permissionButtons { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+    video { display:none; }
     canvas { display:none; }
     #photoOut { display:none; }
     .error { color:#ffb3b3; font-size:13px; margin-top:6px; }
@@ -38,6 +47,12 @@
     <div class="videoBox">
       <video id="video" playsinline autoplay muted></video>
       <img id="photoOut" alt="Foto" />
+      <div id="permissionOverlay">
+        <p>Om foto's te maken heeft deze pagina eerst toestemming nodig voor camera en locatie. Tik op starten en geef daarna, indien nodig op iOS, sensors toestemming.</p>
+        <div class="permissionButtons">
+          <button id="startBtn" type="button">Toestemming starten</button>
+        </div>
+      </div>
       <!-- Overlay met live waarden -->
       <div class="overlay" id="overlay">
         <div class="kv">
@@ -72,6 +87,8 @@
     const retryBtn = document.getElementById('retryBtn');
     const sensorPermBtn = document.getElementById('sensorPermBtn');
     const sensorError = document.getElementById('sensorError');
+    const permissionOverlay = document.getElementById('permissionOverlay');
+    const startBtn = document.getElementById('startBtn');
 
     const yawEl = document.getElementById('yaw');
     const pitchEl = document.getElementById('pitch');
@@ -82,6 +99,10 @@
     let stream = null;
     let lastBlob = null;
     let hasPhoto = false;
+    let cameraReady = false;
+    let locationAllowed = false;
+    let sensorAllowed = false;
+    let needSensorPermission = false;
 
     // Houd actuele sensorgegevens bij zodat we die kunnen meesturen bij 'Verzenden'
     let currentYaw = null, currentPitch = null, currentRoll = null;
@@ -123,6 +144,84 @@
         await startCamera();
       }
       return !!stream;
+    }
+
+    async function requestLocationPermission() {
+      if (!('geolocation' in navigator)) {
+        sensorError.style.display = 'block';
+        sensorError.textContent = 'Locatie niet ondersteund in deze browser.';
+        return false;
+      }
+
+      return new Promise(resolve => {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            const { latitude, longitude } = pos.coords;
+            currentLat = latitude;
+            currentLon = longitude;
+            latEl.textContent = (latitude != null) ? latitude.toFixed(6) : '—';
+            lonEl.textContent = (longitude != null) ? longitude.toFixed(6) : '—';
+            locationAllowed = true;
+            startGeolocation();
+            resolve(true);
+          },
+          err => {
+            sensorError.style.display = 'block';
+            sensorError.textContent = 'Locatie-toestemming geweigerd of niet beschikbaar: ' + err.message;
+            locationAllowed = false;
+            resolve(false);
+          },
+          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+        );
+      });
+    }
+
+    function updatePermissionState() {
+      shotBtn.disabled = !(cameraReady && locationAllowed && sensorAllowed);
+      if (cameraReady) {
+        video.style.display = 'block';
+      }
+    }
+
+    function hidePermissionOverlay() {
+      permissionOverlay.style.display = 'none';
+    }
+
+    function showPermissionOverlay() {
+      permissionOverlay.style.display = 'flex';
+    }
+
+    async function requestPermissionsFlow() {
+      sensorError.style.display = 'none';
+      shotBtn.disabled = true;
+      startBtn.disabled = true;
+
+      // Camera toestemming
+      const cameraOk = await ensureCamera();
+      if (!cameraOk) {
+        startBtn.disabled = false;
+        return;
+      }
+      cameraReady = true;
+
+      // Locatie toestemming
+      await requestLocationPermission();
+      if (!locationAllowed) {
+        startBtn.disabled = false;
+        return;
+      }
+
+      // iOS sensors toestemming
+      await setupIOSPermissionButton();
+
+      if (!needSensorPermission) {
+        sensorAllowed = true;
+      }
+
+      if (cameraReady && locationAllowed && sensorAllowed) {
+        hidePermissionOverlay();
+      }
+      updatePermissionState();
     }
 
     async function takePhoto() {
@@ -213,7 +312,8 @@
     async function setupIOSPermissionButton() {
       const needDO = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
       const needDM = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
-      if (needDO || needDM) {
+      needSensorPermission = needDO || needDM;
+      if (needSensorPermission) {
         sensorPermBtn.style.display = 'inline-block';
         sensorPermBtn.onclick = async () => {
           try {
@@ -221,8 +321,13 @@
             if (needDO) ok = ok && (await DeviceOrientationEvent.requestPermission()) === 'granted';
             if (needDM) ok = ok && (await DeviceMotionEvent.requestPermission()) === 'granted';
             if (ok) {
+              sensorAllowed = true;
               sensorPermBtn.style.display = 'none';
               startDeviceOrientation();
+              if (cameraReady && locationAllowed && sensorAllowed) {
+                hidePermissionOverlay();
+                updatePermissionState();
+              }
             } else {
               sensorError.style.display = 'block';
               sensorError.textContent = 'Sensor-toestemming geweigerd. Heading/pitch/roll niet beschikbaar.';
@@ -233,8 +338,8 @@
           }
         };
       } else {
-        // Geen iOS permissieflow nodig
         sensorPermBtn.style.display = 'none';
+        sensorAllowed = true;
         startDeviceOrientation();
       }
     }
@@ -291,6 +396,7 @@
 
     // ===== UI events =====
     shotBtn.addEventListener('click', async () => {
+      if (shotBtn.disabled) return;
       const ok = await ensureCamera();
       if (!ok) return;
 
@@ -314,12 +420,15 @@
       await startCamera();
     });
 
+    startBtn.addEventListener('click', async () => {
+      await requestPermissionsFlow();
+    });
+
     // Init
     (async () => {
-      await setupIOSPermissionButton(); // toont iOS-knop indien nodig en start sensoren anders
-      startGeolocation();               // start X/Y
-      // Optioneel: start camera direct
-      // startCamera();
+      showPermissionOverlay();
+      shotBtn.disabled = true;
+      sendBtn.disabled = true;
     })();
   </script>
 </body>
