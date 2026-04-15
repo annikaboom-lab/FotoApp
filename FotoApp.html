@@ -1,0 +1,376 @@
+
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <style>
+    :root { --primary:#0067b8; }
+    html,body { margin:0; padding:0; height:100%; background:#000; color:#fff; font-family: system-ui, sans-serif; }
+    .wrap { display:flex; flex-direction:column; min-height:100%; }
+    .videoBox { position:relative; flex:1; display:flex; align-items:center; justify-content:center; background:#000; }
+    video, img#photoOut { width:100%; height:100%; object-fit:cover; }
+    .overlay {
+      position:absolute; left:12px; right:12px; bottom:96px; 
+      background: rgba(0,0,0,.45); backdrop-filter: blur(4px);
+      border-radius:12px; padding:10px; font-size:14px; line-height:1.4;
+    }
+    .kv { display:grid; grid-template-columns: 1fr auto; gap:6px; }
+    .kv .label { color:#cfcfcf; }
+    .controls {
+      position: fixed; left: 0; right: 0; bottom: env(safe-area-inset-bottom, 0);
+      display:flex; gap:12px; padding:16px; background: linear-gradient(to top, rgba(0,0,0,.55), rgba(0,0,0,0));
+      justify-content:center; align-items:center;
+    }
+    button {
+      padding:14px 18px; border:none; border-radius:100px; font-size:16px;
+      background: var(--primary); color:#fff; min-width:140px;
+    }
+    button.secondary { background:#2b2b2b; }
+    #sensorPermBtn { display:none; margin-left:12px; }
+    canvas { display:none; }
+    #photoOut { display:none; }
+    .error { color:#ffb3b3; font-size:13px; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="videoBox">
+      <video id="video" playsinline autoplay muted></video>
+      <img id="photoOut" alt="Foto" />
+      <!-- Overlay met live waarden -->
+      <div class="overlay" id="overlay">
+        <div class="kv">
+          <div class="label">Heading (yaw)</div><div id="yaw">—</div>
+          <div class="label">Pitch</div><div id="pitch">—</div>
+          <div class="label">Roll</div><div id="roll">—</div>
+          <div class="label">Y (lat)</div><div id="lat">—</div>
+          <div class="label">X (lon)</div><div id="lon">—</div>
+          <div class="label">Locatie</div><div id="locationStatus">Laden…</div>
+        </div>
+        <div id="sensorError" class="error" style="display:none;"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="shotBtn" type="button" disabled>Foto maken</button>
+      <button id="sendBtn" class="secondary" type="button" disabled>Verzenden</button>
+      <button id="retryBtn" class="secondary" type="button" style="display:none;">Opnieuw</button>
+      <button id="sensorPermBtn" class="secondary" type="button">Sensors toestaan (iOS)</button>
+    </div>
+  </div>
+
+  <canvas id="canvas" width="1280" height="720"></canvas>
+
+  <script>
+    const video = document.getElementById('video');
+    const photoOut = document.getElementById('photoOut');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    const shotBtn = document.getElementById('shotBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const retryBtn = document.getElementById('retryBtn');
+    const sensorPermBtn = document.getElementById('sensorPermBtn');
+    const sensorError = document.getElementById('sensorError');
+
+    const yawEl = document.getElementById('yaw');
+    const pitchEl = document.getElementById('pitch');
+    const rollEl = document.getElementById('roll');
+    const latEl = document.getElementById('lat');
+    const lonEl = document.getElementById('lon');
+    const locationStatus = document.getElementById('locationStatus');
+
+    let stream = null;
+    let lastBlob = null;
+    let hasPhoto = false;
+    let locationReady = false;
+
+    // Houd actuele sensorgegevens bij zodat we die kunnen meesturen bij 'Verzenden'
+    let currentYaw = null, currentPitch = null, currentRoll = null;
+    let currentLat = null, currentLon = null;
+
+    // ===== Camera =====
+    async function startCamera() {
+      if (stream) return;
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 }, height: { ideal: 1080 }
+        }
+      };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        await video.play();
+      } catch (e) {
+        alert('Kon de camera niet starten. Gebruik HTTPS en geef cameratoestemming.\n' + e);
+      }
+    }
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+    }
+
+    async function ensureCamera() {
+      if (!('mediaDevices' in navigator) || !('getUserMedia' in navigator.mediaDevices)) {
+        alert('Deze browser ondersteunt geen camera-toegang (getUserMedia).');
+        return false;
+      }
+      if (!stream) {
+        await startCamera();
+      }
+      return !!stream;
+    }
+
+    async function takePhoto() {
+      // Wacht tot videometadata (resolutie) bekend is
+      if (!video.videoWidth || !video.videoHeight) {
+        await new Promise(r => {
+          const h = () => { video.removeEventListener('loadedmetadata', h); r(); };
+          video.addEventListener('loadedmetadata', h);
+        });
+      }
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      canvas.width = w;
+      canvas.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+
+      canvas.toBlob(blob => {
+        if (!blob) { alert('Snapshot mislukt'); return; }
+        lastBlob = blob;
+        const url = URL.createObjectURL(blob);
+        photoOut.src = url;
+        photoOut.style.display = 'block';
+        video.style.display = 'none';
+        hasPhoto = true;
+
+        // Camera stoppen zodra we de foto hebben
+        stopCamera();
+
+        // UI updates
+        sendBtn.disabled = false;
+        retryBtn.style.display = 'inline-block';
+      }, 'image/jpeg', 0.9);
+    }
+
+    // ===== Device Orientation (heading/pitch/roll) =====
+    function formatDeg(val) {
+      if (val === null || val === undefined || Number.isNaN(val)) return '—';
+      return `${val.toFixed(1)}°`;
+    }
+    const clamp360 = v => (v % 360 + 360) % 360;
+
+    function getScreenRotationDeg() {
+      const o = screen.orientation || {};
+      const angle = typeof o.angle === 'number' ? o.angle : (window.orientation || 0);
+      return (Number(angle) + 360) % 360; // 0/90/180/270
+    }
+
+    function updateOrientationFromEvent(e) {
+      let { alpha, beta, gamma } = e;
+      if (alpha == null && beta == null && gamma == null) return;
+
+      const rot = getScreenRotationDeg();
+      let yaw = alpha;     // 0..360
+      let pitch = beta;    // -180..180
+      let roll = gamma;    // -90..90
+
+      // Praktische correctie voor schermrotatie
+      if (rot === 90) {
+        const tmp = pitch; pitch = -roll; roll = tmp;
+      } else if (rot === 270) {
+        const tmp = pitch; pitch = roll; roll = -tmp;
+      } else if (rot === 180) {
+        pitch = -pitch; roll = -roll;
+        if (yaw != null) yaw = (yaw + 180) % 360;
+      }
+      if (yaw != null) yaw = clamp360(yaw);
+
+      currentYaw = (typeof yaw === 'number') ? yaw : null;
+      currentPitch = (typeof pitch === 'number') ? pitch : null;
+      currentRoll = (typeof roll === 'number') ? roll : null;
+
+      yawEl.textContent = formatDeg(currentYaw);
+      pitchEl.textContent = formatDeg(currentPitch);
+      rollEl.textContent = formatDeg(currentRoll);
+    }
+
+    function startDeviceOrientation() {
+      sensorError.style.display = 'none';
+      if ('DeviceOrientationEvent' in window) {
+        window.addEventListener('deviceorientation', updateOrientationFromEvent, true);
+      } else {
+        sensorError.style.display = 'block';
+        sensorError.textContent = 'DeviceOrientation niet ondersteund in deze browser.';
+      }
+    }
+
+    // iOS: expliciete toestemming voor sensors
+    async function setupIOSPermissionButton() {
+      const needDO = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
+      const needDM = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
+      if (needDO || needDM) {
+        sensorPermBtn.style.display = 'inline-block';
+        sensorPermBtn.onclick = async () => {
+          try {
+            let ok = true;
+            if (needDO) ok = ok && (await DeviceOrientationEvent.requestPermission()) === 'granted';
+            if (needDM) ok = ok && (await DeviceMotionEvent.requestPermission()) === 'granted';
+            if (ok) {
+              sensorPermBtn.style.display = 'none';
+              startDeviceOrientation();
+            } else {
+              sensorError.style.display = 'block';
+              sensorError.textContent = 'Sensor-toestemming geweigerd. Heading/pitch/roll niet beschikbaar.';
+            }
+          } catch (e) {
+            sensorError.style.display = 'block';
+            sensorError.textContent = 'Fout bij sensor-toestemming: ' + e;
+          }
+        };
+      } else {
+        // Geen iOS permissieflow nodig
+        sensorPermBtn.style.display = 'none';
+        startDeviceOrientation();
+      }
+    }
+
+    // ===== Geolocatie (X/Y: lon/lat) =====
+    function updateLocationStatus(text, ready = false) {
+      locationStatus.textContent = text;
+      if (ready) {
+        locationReady = true;
+        shotBtn.disabled = false;
+      } else if (!locationReady) {
+        shotBtn.disabled = true;
+      }
+    }
+
+    function reportLocationError(message) {
+      sensorError.style.display = 'block';
+      sensorError.textContent = message;
+      updateLocationStatus('Locatie fout');
+    }
+
+    async function startGeolocation() {
+      if (!('geolocation' in navigator)) {
+        latEl.textContent = '—';
+        lonEl.textContent = '—';
+        updateLocationStatus('Niet ondersteund');
+        reportLocationError('Geolocatie niet ondersteund in deze browser.');
+        return Promise.reject(new Error('geolocation-not-supported'));
+      }
+
+      updateLocationStatus('Locatie laden…');
+
+      return new Promise((resolve, reject) => {
+        let firstPositionReceived = false;
+
+        const handlePosition = pos => {
+          const { latitude, longitude } = pos.coords;
+          currentLat = latitude;
+          currentLon = longitude;
+          latEl.textContent = (latitude != null) ? latitude.toFixed(6) : '—';
+          lonEl.textContent = (longitude != null) ? longitude.toFixed(6) : '—';
+
+          if (!firstPositionReceived) {
+            firstPositionReceived = true;
+            updateLocationStatus('Locatie gereed', true);
+            sensorError.style.display = 'none';
+            resolve();
+          }
+        };
+
+        const handleError = err => {
+          if (!firstPositionReceived) {
+            updateLocationStatus('Locatie fout');
+            reject(err);
+          }
+          reportLocationError('Locatie niet beschikbaar: ' + err.message);
+        };
+
+        navigator.geolocation.watchPosition(
+          handlePosition,
+          handleError,
+          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+        );
+      });
+    }
+
+    // ===== Verzenden =====
+    async function sendData() {
+      if (!lastBlob) { alert('Geen foto om te verzenden.'); return; }
+      try {
+        const form = new FormData();
+        const filename = `foto_${new Date().toISOString().replace(/[:.]/g,'-')}.jpg`;
+        form.append('photo', lastBlob, filename);
+
+        // Voeg sensordata toe (zoals getoond op scherm)
+        if (currentYaw != null)  form.append('heading', currentYaw.toFixed(1));
+        if (currentPitch != null) form.append('pitch', currentPitch.toFixed(1));
+        if (currentRoll != null)  form.append('roll', currentRoll.toFixed(1));
+        if (currentLat != null)   form.append('lat', currentLat.toFixed(6));
+        if (currentLon != null)   form.append('lon', currentLon.toFixed(6));
+
+        const resp = await fetch('/upload', {
+          method: 'POST',
+          body: form
+        });
+        if (!resp.ok) throw new Error(`Upload faalde: ${resp.status}`);
+        alert('Verzonden!');
+      } catch (e) {
+        alert('Verzenden mislukt: ' + e.message);
+      }
+    }
+
+    // ===== UI events =====
+    shotBtn.addEventListener('click', async () => {
+      if (!locationReady) {
+        alert('Wacht tot de locatie is geladen voordat je een foto maakt.');
+        return;
+      }
+
+      const ok = await ensureCamera();
+      if (!ok) return;
+
+      // mini-delay voor auto-exposure
+      await new Promise(r => setTimeout(r, 200));
+      await takePhoto();
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      await sendData();
+    });
+
+    retryBtn.addEventListener('click', async () => {
+      hasPhoto = false;
+      lastBlob = null;
+      photoOut.style.display = 'none';
+      photoOut.src = '';
+      video.style.display = 'block';
+      sendBtn.disabled = true;
+      retryBtn.style.display = 'none';
+      await startCamera();
+    });
+
+    // Init
+    (async () => {
+      await setupIOSPermissionButton(); // toont iOS-knop indien nodig en start sensoren anders
+      try {
+        await startGeolocation();       // start X/Y en wacht op de eerste locatiefix
+      } catch (e) {
+        console.warn('Geolocatie niet beschikbaar:', e);
+      }
+      // Optioneel: start camera direct
+      // startCamera();
+    })();
+  </script>
+</body>
+</html>
