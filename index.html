@@ -46,14 +46,13 @@
           <div class="label">Roll</div><div id="roll">—</div>
           <div class="label">Y (lat)</div><div id="lat">—</div>
           <div class="label">X (lon)</div><div id="lon">—</div>
-          <div class="label">Locatie</div><div id="locationStatus">Laden…</div>
         </div>
         <div id="sensorError" class="error" style="display:none;"></div>
       </div>
     </div>
 
     <div class="controls">
-      <button id="shotBtn" type="button" disabled>Foto maken</button>
+      <button id="shotBtn" type="button">Foto maken</button>
       <button id="sendBtn" class="secondary" type="button" disabled>Verzenden</button>
       <button id="retryBtn" class="secondary" type="button" style="display:none;">Opnieuw</button>
       <button id="sensorPermBtn" class="secondary" type="button">Sensors toestaan (iOS)</button>
@@ -79,12 +78,10 @@
     const rollEl = document.getElementById('roll');
     const latEl = document.getElementById('lat');
     const lonEl = document.getElementById('lon');
-    const locationStatus = document.getElementById('locationStatus');
 
     let stream = null;
     let lastBlob = null;
     let hasPhoto = false;
-    let locationReady = false;
 
     // Houd actuele sensorgegevens bij zodat we die kunnen meesturen bij 'Verzenden'
     let currentYaw = null, currentPitch = null, currentRoll = null;
@@ -243,65 +240,27 @@
     }
 
     // ===== Geolocatie (X/Y: lon/lat) =====
-    function updateLocationStatus(text, ready = false) {
-      locationStatus.textContent = text;
-      if (ready) {
-        locationReady = true;
-        shotBtn.disabled = false;
-      } else if (!locationReady) {
-        shotBtn.disabled = true;
-      }
-    }
-
-    function reportLocationError(message) {
-      sensorError.style.display = 'block';
-      sensorError.textContent = message;
-      updateLocationStatus('Locatie fout');
-    }
-
-    async function startGeolocation() {
+    function startGeolocation() {
       if (!('geolocation' in navigator)) {
         latEl.textContent = '—';
         lonEl.textContent = '—';
-        updateLocationStatus('Niet ondersteund');
-        reportLocationError('Geolocatie niet ondersteund in deze browser.');
-        return Promise.reject(new Error('geolocation-not-supported'));
+        return;
       }
-
-      updateLocationStatus('Locatie laden…');
-
-      return new Promise((resolve, reject) => {
-        let firstPositionReceived = false;
-
-        const handlePosition = pos => {
+      // Watch position voor actuele updates
+      navigator.geolocation.watchPosition(
+        pos => {
           const { latitude, longitude } = pos.coords;
           currentLat = latitude;
           currentLon = longitude;
           latEl.textContent = (latitude != null) ? latitude.toFixed(6) : '—';
           lonEl.textContent = (longitude != null) ? longitude.toFixed(6) : '—';
-
-          if (!firstPositionReceived) {
-            firstPositionReceived = true;
-            updateLocationStatus('Locatie gereed', true);
-            sensorError.style.display = 'none';
-            resolve();
-          }
-        };
-
-        const handleError = err => {
-          if (!firstPositionReceived) {
-            updateLocationStatus('Locatie fout');
-            reject(err);
-          }
-          reportLocationError('Locatie niet beschikbaar: ' + err.message);
-        };
-
-        navigator.geolocation.watchPosition(
-          handlePosition,
-          handleError,
-          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-        );
-      });
+        },
+        err => {
+          sensorError.style.display = 'block';
+          sensorError.textContent = 'Locatie niet beschikbaar: ' + err.message;
+        },
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+      );
     }
 
     // ===== Verzenden =====
@@ -332,11 +291,6 @@
 
     // ===== UI events =====
     shotBtn.addEventListener('click', async () => {
-      if (!locationReady) {
-        alert('Wacht tot de locatie is geladen voordat je een foto maakt.');
-        return;
-      }
-
       const ok = await ensureCamera();
       if (!ok) return;
 
@@ -363,11 +317,7 @@
     // Init
     (async () => {
       await setupIOSPermissionButton(); // toont iOS-knop indien nodig en start sensoren anders
-      try {
-        await startGeolocation();       // start X/Y en wacht op de eerste locatiefix
-      } catch (e) {
-        console.warn('Geolocatie niet beschikbaar:', e);
-      }
+      startGeolocation();               // start X/Y
       // Optioneel: start camera direct
       // startCamera();
     })();
